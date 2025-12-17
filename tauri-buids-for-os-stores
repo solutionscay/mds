@@ -1,0 +1,571 @@
+# Tauri App Store Build Guide
+## Windows (MSIX) + Mac Universal (PKG) Template
+
+This guide documents the complete setup for building Tauri apps for both the Microsoft Store and Mac App Store. Use this as a template for new projects to avoid chasing configuration issues.
+
+---
+
+## Table of Contents
+1. [Project Structure](#project-structure)
+2. [Prerequisites](#prerequisites)
+3. [Mac App Store Setup](#mac-app-store-setup)
+4. [Windows Store Setup](#windows-store-setup)
+5. [Tauri Configuration](#tauri-configuration)
+6. [Build Commands](#build-commands)
+7. [Common Pitfalls](#common-pitfalls)
+8. [Checklist](#checklist)
+
+---
+
+## Project Structure
+
+```
+your-app/
+├── build_tools/
+│   ├── build-macos.sh          # Mac App Store build script
+│   ├── build-msix.ps1          # Windows Store build script
+│   └── sign-msix.ps1           # Windows local testing (optional)
+├── src-tauri/
+│   ├── tauri.conf.json
+│   ├── Cargo.toml
+│   ├── entitlements.plist      # Main app entitlements (Mac)
+│   ├── entitlements-sidecar.plist  # Sidecar entitlements (Mac)
+│   ├── entitlements-dev.plist  # Development entitlements (Mac, optional)
+│   ├── AppxManifest.xml        # Windows Store manifest
+│   ├── icons/
+│   │   ├── icon.icns           # Mac icon
+│   │   ├── icon.ico            # Windows icon
+│   │   ├── 32x32.png
+│   │   ├── 128x128.png
+│   │   ├── 128x128@2x.png
+│   │   ├── Square44x44Logo.png # Windows Store
+│   │   ├── Square150x150Logo.png
+│   │   └── StoreLogo.png
+│   └── binaries/               # Sidecar binaries
+│       ├── ffmpeg-aarch64-apple-darwin
+│       ├── ffmpeg-x86_64-apple-darwin
+│       ├── ffmpeg-x86_64-pc-windows-msvc.exe
+│       └── ... (other sidecars)
+└── package.json
+```
+
+---
+
+## Prerequisites
+
+### Mac App Store
+- Apple Developer Program membership ($99/year)
+- Xcode Command Line Tools: `xcode-select --install`
+- Two certificates in Keychain:
+  - `3rd Party Mac Developer Application: Your Name (TEAM_ID)`
+  - `3rd Party Mac Developer Installer: Your Name (TEAM_ID)`
+- Provisioning profile from Apple Developer portal
+- Node.js 18+
+- Rust toolchain with targets:
+  ```bash
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin
+  ```
+
+### Windows Store
+- Microsoft Partner Center account (free or paid)
+- Windows SDK (via Visual Studio Installer)
+- Node.js 18+
+- Rust toolchain
+
+---
+
+## Mac App Store Setup
+
+### 1. Create Entitlements Files
+
+#### `src-tauri/entitlements.plist` (Main App)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- REQUIRED: Application identifier (TEAM_ID.bundle.identifier) -->
+    <key>com.apple.application-identifier</key>
+    <string>YOUR_TEAM_ID.com.yourcompany.yourapp</string>
+
+    <!-- REQUIRED: Team identifier -->
+    <key>com.apple.developer.team-identifier</key>
+    <string>YOUR_TEAM_ID</string>
+
+    <!-- REQUIRED: App Sandbox -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- Network access (if needed) -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- File access via open/save dialogs -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- Add other entitlements as needed:
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+    -->
+</dict>
+</plist>
+```
+
+**CRITICAL**: The `com.apple.application-identifier` and `com.apple.developer.team-identifier` are **required** for TestFlight/App Store. Without them, you'll get error 90886.
+
+#### `src-tauri/entitlements-sidecar.plist` (For bundled binaries like ffmpeg)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- REQUIRED: App Sandbox (yes, sidecars need this too!) -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+
+    <!-- REQUIRED: Inherit sandbox from parent app -->
+    <key>com.apple.security.inherit</key>
+    <true/>
+</dict>
+</plist>
+```
+
+**CRITICAL**: Sidecars need BOTH `app-sandbox` AND `inherit`. Just `inherit` alone will fail with App Store validation.
+
+### 2. Create Provisioning Profile
+
+1. Go to [Apple Developer Portal](https://developer.apple.com/account/resources/profiles/list)
+2. Create new profile:
+   - Type: **Mac App Store**
+   - App ID: Your app's bundle identifier
+   - Certificate: Select your "3rd Party Mac Developer Application" cert
+3. Download and save to `~/Downloads/YourApp_Mac_App_Store.provisionprofile`
+
+### 3. Mac Build Script Template
+
+Save as `build_tools/build-macos.sh`:
+
+```bash
+#!/bin/bash
+# Mac App Store Build Script
+# Usage:
+#   ./build_tools/build-macos.sh              # Full build
+#   ./build_tools/build-macos.sh --bump       # Bump patch version first
+#   ./build_tools/build-macos.sh --skip-build # Skip compile, just re-sign
+
+set -e
+
+# ============================================
+# CONFIGURATION - UPDATE THESE FOR YOUR APP
+# ============================================
+APP_NAME="YourApp"                                    # Must match productName in tauri.conf.json
+BUNDLE_ID="com.yourcompany.yourapp"                   # Must match identifier in tauri.conf.json
+TEAM_ID="YOUR_TEAM_ID"                                # Your Apple Team ID
+SIGNING_IDENTITY="3rd Party Mac Developer Application: Your Company ($TEAM_ID)"
+INSTALLER_IDENTITY="3rd Party Mac Developer Installer: Your Company ($TEAM_ID)"
+PROVISIONING_PROFILE="$HOME/Downloads/YourApp_Mac_App_Store.provisionprofile"
+# ============================================
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+TAURI_DIR="$PROJECT_DIR/src-tauri"
+BUILD_TARGET="universal-apple-darwin"
+RELEASE_DIR="$TAURI_DIR/target/$BUILD_TARGET/release"
+BUNDLE_DIR="$RELEASE_DIR/bundle/macos"
+APP_PATH="$BUNDLE_DIR/$APP_NAME.app"
+
+cd "$PROJECT_DIR"
+
+# Parse arguments
+BUMP_VERSION=false
+SKIP_BUILD=false
+
+for arg in "$@"; do
+    case $arg in
+        --bump) BUMP_VERSION=true ;;
+        --skip-build) SKIP_BUILD=true ;;
+    esac
+done
+
+# Get current version
+VERSION=$(node -p "require('./package.json').version")
+echo -e "${BLUE}Current version: $VERSION${NC}"
+
+# Bump version if requested
+if [ "$BUMP_VERSION" = true ]; then
+    IFS='.' read -r major minor patch <<< "$VERSION"
+    patch=$((patch + 1))
+    NEW_VERSION="$major.$minor.$patch"
+    echo -e "${YELLOW}Bumping version to $NEW_VERSION${NC}"
+
+    # Update package.json
+    node -e "
+        const fs = require('fs');
+        const pkg = require('./package.json');
+        pkg.version = '$NEW_VERSION';
+        fs.writeFileSync('./package.json', JSON.stringify(pkg, null, 2) + '\n');
+    "
+
+    # Update tauri.conf.json
+    node -e "
+        const fs = require('fs');
+        const conf = require('./src-tauri/tauri.conf.json');
+        conf.version = '$NEW_VERSION';
+        fs.writeFileSync('./src-tauri/tauri.conf.json', JSON.stringify(conf, null, 2) + '\n');
+    "
+
+    # Update Cargo.toml
+    sed -i '' "s/^version = \".*\"/version = \"$NEW_VERSION\"/" "$TAURI_DIR/Cargo.toml"
+
+    VERSION="$NEW_VERSION"
+    echo -e "${GREEN}Version bumped to $VERSION${NC}"
+fi
+
+echo -e "${BLUE}Building version: $VERSION${NC}"
+
+# Check prerequisites
+if [ ! -f "$PROVISIONING_PROFILE" ]; then
+    echo -e "${RED}Error: Provisioning profile not found at $PROVISIONING_PROFILE${NC}"
+    exit 1
+fi
+
+if ! security find-identity -v -p codesigning | grep -q "$SIGNING_IDENTITY"; then
+    echo -e "${RED}Error: Signing identity not found: $SIGNING_IDENTITY${NC}"
+    exit 1
+fi
+
+# Build
+if [ "$SKIP_BUILD" = false ]; then
+    echo -e "${YELLOW}Building Tauri app (universal binary)...${NC}"
+    npm run tauri build -- --target $BUILD_TARGET
+else
+    echo -e "${YELLOW}Skipping build (--skip-build)${NC}"
+fi
+
+# Verify app exists
+if [ ! -d "$APP_PATH" ]; then
+    echo -e "${RED}Error: App not found at $APP_PATH${NC}"
+    exit 1
+fi
+
+# Embed provisioning profile
+echo -e "${YELLOW}Embedding provisioning profile...${NC}"
+cp "$PROVISIONING_PROFILE" "$APP_PATH/Contents/embedded.provisionprofile"
+
+# CRITICAL: Remove quarantine attributes (prevents error 91109)
+echo -e "${YELLOW}Removing quarantine attributes...${NC}"
+xattr -cr "$APP_PATH"
+
+# Sign sidecar binaries (if any)
+SIDECAR_ENTITLEMENTS="$TAURI_DIR/entitlements-sidecar.plist"
+MACOS_DIR="$APP_PATH/Contents/MacOS"
+
+echo -e "${YELLOW}Signing sidecar binaries...${NC}"
+for sidecar in "$MACOS_DIR/ffmpeg" "$MACOS_DIR/ffprobe"; do  # Add your sidecars here
+    if [ -f "$sidecar" ]; then
+        echo "  Signing $(basename "$sidecar")..."
+        codesign --force --verify --verbose \
+            --sign "$SIGNING_IDENTITY" \
+            --identifier "$BUNDLE_ID.$(basename "$sidecar")" \
+            --entitlements "$SIDECAR_ENTITLEMENTS" \
+            "$sidecar"
+    fi
+done
+
+# Sign main app bundle
+echo -e "${YELLOW}Signing main app bundle...${NC}"
+codesign --force --verify --verbose \
+    --sign "$SIGNING_IDENTITY" \
+    --identifier "$BUNDLE_ID" \
+    --entitlements "$TAURI_DIR/entitlements.plist" \
+    "$APP_PATH"
+
+# Create installer package
+echo -e "${YELLOW}Creating installer package...${NC}"
+PKG_PATH="$RELEASE_DIR/${APP_NAME}_${VERSION}.pkg"
+productbuild --component "$APP_PATH" /Applications \
+    --sign "$INSTALLER_IDENTITY" \
+    "$PKG_PATH"
+
+echo ""
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}Build complete!${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+echo -e "Version: ${BLUE}$VERSION${NC}"
+echo -e "Package: ${BLUE}$PKG_PATH${NC}"
+echo ""
+echo -e "Upload to App Store via Transporter app"
+```
+
+---
+
+## Windows Store Setup
+
+### 1. Create AppxManifest.xml
+
+Save as `src-tauri/AppxManifest.xml`:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="YourCompany.YourApp"
+    Publisher="CN=YourCompany"
+    Version="0.1.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Your App Name</DisplayName>
+    <PublisherDisplayName>Your Company</PublisherDisplayName>
+    <Logo>icons\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="YourApp.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Your App Name"
+        Description="Your app description"
+        BackgroundColor="transparent"
+        Square150x150Logo="icons\Square150x150Logo.png"
+        Square44x44Logo="icons\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="icons\Wide310x150Logo.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+</Package>
+```
+
+**Important**: When submitting to Microsoft Store:
+- Update `Publisher` to match your Partner Center identity
+- Microsoft signs the package automatically - no certificate purchase needed
+
+### 2. Windows Build Script
+
+The `build_tools/build-msix.ps1` script handles:
+- Building the Tauri app
+- Packaging into MSIX format
+- Optional self-signing for local testing
+
+Usage:
+```powershell
+.\build_tools\build-msix.ps1              # Full build
+.\build_tools\build-msix.ps1 -SkipBuild   # Just repackage
+.\build_tools\build-msix.ps1 -SelfSign    # Sign for local testing
+```
+
+---
+
+## Tauri Configuration
+
+### `src-tauri/tauri.conf.json`
+
+```json
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "YourApp",
+  "version": "0.1.0",
+  "identifier": "com.yourcompany.yourapp",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Your App",
+        "width": 1200,
+        "height": 800,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "public.app-category.utilities",
+    "targets": ["nsis", "dmg", "app"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": [
+      "binaries/ffmpeg",
+      "binaries/ffprobe"
+    ],
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
+    },
+    "macOS": {
+      "entitlements": "./entitlements.plist",
+      "minimumSystemVersion": "12.0"
+    }
+  }
+}
+```
+
+---
+
+## Build Commands
+
+### Mac App Store
+```bash
+# Full build
+./build_tools/build-macos.sh
+
+# Bump version and build
+./build_tools/build-macos.sh --bump
+
+# Re-sign without rebuilding (after entitlement changes)
+./build_tools/build-macos.sh --skip-build
+```
+
+### Windows Store
+```powershell
+# Full build
+.\build_tools\build-msix.ps1
+
+# Just repackage
+.\build_tools\build-msix.ps1 -SkipBuild
+
+# Sign for local testing
+.\build_tools\build-msix.ps1 -SelfSign
+```
+
+---
+
+## Common Pitfalls
+
+### Mac App Store
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `App sandbox not enabled` on sidecars | Sidecar entitlements missing `app-sandbox` | Add `com.apple.security.app-sandbox` to `entitlements-sidecar.plist` |
+| `Missing application identifier` (90886) | Main entitlements missing app ID | Add `com.apple.application-identifier` and `com.apple.developer.team-identifier` to `entitlements.plist` |
+| `Quarantine attribute` (91109) | Downloaded files have xattr | Add `xattr -cr "$APP_PATH"` before signing |
+| `Provisioning profile doesn't match` | Bundle ID mismatch | Ensure `identifier` in tauri.conf.json matches provisioning profile |
+| `Signature invalid` | Signed in wrong order | Sign sidecars FIRST, then main app bundle |
+
+### Windows Store
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `Publisher mismatch` | AppxManifest Publisher doesn't match Partner Center | Update Publisher CN to match your Partner Center identity |
+| `MakeAppx not found` | Windows SDK not installed | Install via Visual Studio Installer |
+| `Version format invalid` | MSIX requires 4-part version | Use `x.x.x.0` format in AppxManifest |
+
+---
+
+## Checklist
+
+### Before First Submission
+
+#### Mac
+- [ ] Apple Developer membership active
+- [ ] Bundle ID registered in Apple Developer portal
+- [ ] App ID created with correct capabilities
+- [ ] Provisioning profile created and downloaded
+- [ ] Both certificates installed (Application + Installer)
+- [ ] `entitlements.plist` has `com.apple.application-identifier`
+- [ ] `entitlements.plist` has `com.apple.developer.team-identifier`
+- [ ] `entitlements-sidecar.plist` has BOTH `app-sandbox` and `inherit`
+- [ ] Build script removes quarantine attributes
+- [ ] Build script signs sidecars before main app
+
+#### Windows
+- [ ] Partner Center account created
+- [ ] App name reserved in Partner Center
+- [ ] `AppxManifest.xml` Publisher matches Partner Center
+- [ ] All required icons present (44x44, 150x150, StoreLogo)
+- [ ] Version in AppxManifest is 4-part format
+
+### Before Each Submission
+
+- [ ] Version bumped in all files (package.json, tauri.conf.json, Cargo.toml)
+- [ ] For Mac: Version also bumped in AppxManifest.xml Identity
+- [ ] Clean build completed
+- [ ] Package uploaded successfully to Transporter (Mac) or Partner Center (Windows)
+
+---
+
+## Version History
+
+| Date | Changes |
+|------|---------|
+| 2025-12-17 | Initial template created from FlowBatch project learnings |
+
+---
+
+## Quick Reference
+
+### Mac Signing Order
+1. Embed provisioning profile
+2. Remove quarantine attributes (`xattr -cr`)
+3. Sign sidecars with sidecar entitlements
+4. Sign main app with main entitlements
+5. Create pkg with installer identity
+
+### Required Mac Entitlements (Main App)
+```
+com.apple.application-identifier = TEAM_ID.bundle.id
+com.apple.developer.team-identifier = TEAM_ID
+com.apple.security.app-sandbox = true
+```
+
+### Required Mac Entitlements (Sidecars)
+```
+com.apple.security.app-sandbox = true
+com.apple.security.inherit = true
+```
+
+### Useful Commands
+```bash
+# Verify signature
+codesign --verify --deep --strict --verbose=2 "path/to/App.app"
+
+# Check embedded entitlements
+codesign -d --entitlements - "path/to/App.app"
+
+# Check provisioning profile contents
+security cms -D -i "path/to/embedded.provisionprofile"
+
+# List signing identities
+security find-identity -v -p codesigning
+```
