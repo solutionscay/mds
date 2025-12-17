@@ -1,0 +1,576 @@
+# Store Asset Pipeline Guide
+
+A comprehensive guide for setting up an automated asset generation pipeline for mobile app store submissions (iOS App Store, Google Play, macOS App Store).
+
+**Purpose:** This document provides a reusable template for AI agents and developers to set up store asset pipelines in any mobile project.
+
+---
+
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Directory Structure](#directory-structure)
+3. [Required Assets by Platform](#required-assets-by-platform)
+4. [Pipeline Components](#pipeline-components)
+5. [Screenshot Strategy (ASO)](#screenshot-strategy-aso)
+6. [App Icon Generation](#app-icon-generation)
+7. [Implementation Guide](#implementation-guide)
+8. [CI/CD Integration](#cicd-integration)
+
+---
+
+## Overview
+
+### What This Pipeline Does
+
+1. **Screenshot Processing** - Takes raw app screenshots and generates marketing-ready images with:
+   - Themed backgrounds matching your app's color palette
+   - Marketing headlines and subtext
+   - Neo-Brutalist/retro device frames
+   - Multiple size variants for each platform
+
+2. **App Icon Generation** - Creates app icons in all required sizes from a single master image (1024x1024 PNG or SVG)
+
+3. **Batch Processing** - Automates generation of all assets following App Store Optimization (ASO) best practices
+
+### Technology Stack
+
+- **Python 3.8+** with Pillow (PIL) for image processing
+- Optional: cairosvg for SVG to PNG conversion
+- No cloud services required - runs entirely locally
+
+---
+
+## Directory Structure
+
+```
+project/
+├── img-tools/                    # Asset generation tools
+│   ├── generate_store_assets.py  # Main generator script
+│   ├── batch_generate.py         # Batch processing with ASO sequence
+│   ├── generate_app_icon.py      # Dedicated icon generator (optional)
+│   ├── fonts/                    # Custom fonts (TTF files)
+│   │   ├── SpaceGrotesk-Bold.ttf
+│   │   ├── SpaceGrotesk-Regular.ttf
+│   │   └── Inter-Regular.ttf
+│   ├── icons/                    # App icon source files
+│   │   ├── app_icon.svg          # Vector source (optional)
+│   │   └── app_icon_1024.png     # Master PNG (required)
+│   ├── input/                    # Raw screenshots organized by screen
+│   │   ├── 01-home/
+│   │   ├── 02-gameplay/
+│   │   ├── 03-success/
+│   │   └── ...
+│   └── output/                   # Generated assets
+│       ├── iphone/               # iPhone screenshots
+│       ├── ipad/                 # iPad screenshots
+│       ├── iap-promo/            # In-App Purchase promotional images
+│       ├── google-play/          # Google Play assets
+│       └── icons/                # Generated app icons
+```
+
+---
+
+## Required Assets by Platform
+
+### iOS App Store (App Store Connect)
+
+| Asset | Size | Required |
+|-------|------|----------|
+| iPhone 6.7" Screenshots | 1290 × 2796 or 1284 × 2778 | Yes (at least one) |
+| iPhone 6.5" Screenshots | 1242 × 2688 | Yes (at least one) |
+| iPhone 5.5" Screenshots | 1242 × 2208 | Legacy, optional |
+| iPad 12.9" Screenshots | 2048 × 2732 | If supporting iPad |
+| App Icon | 1024 × 1024 | Yes |
+| IAP Promotional Image | 1024 × 1024 | If using IAP |
+
+**Screenshot limits:** Up to 10 per device size
+
+### Google Play Store
+
+| Asset | Size | Required |
+|-------|------|----------|
+| Phone Screenshots | 1080 × 1920 (min 320px, max 3840px) | Yes (2-8) |
+| 7" Tablet Screenshots | 1080 × 1920 | If supporting tablets |
+| 10" Tablet Screenshots | 1080 × 1920 | If supporting tablets |
+| Feature Graphic | 1024 × 500 | Yes |
+| App Icon | 512 × 512 | Yes |
+| TV Banner | 1280 × 720 | If supporting TV |
+
+### macOS App Store
+
+| Asset | Size | Required |
+|-------|------|----------|
+| Screenshots | 1280 × 800 to 2880 × 1800 | Yes |
+| App Icon | 1024 × 1024 (+ all scaled sizes) | Yes |
+
+---
+
+## Pipeline Components
+
+### 1. Color Palette Configuration
+
+Define your app's color palette at the top of `generate_store_assets.py`:
+
+```python
+COLORS = {
+    # Primary brand color
+    'primary': (255, 107, 107),      # RGB tuple
+    'primary_dark': (238, 93, 93),
+    'primary_light': (255, 138, 128),
+
+    # Secondary color
+    'secondary': (100, 181, 246),
+
+    # Accent color
+    'accent': (255, 224, 130),
+
+    # Background colors
+    'background': (250, 249, 246),
+    'tint_red': (255, 240, 240),
+    'tint_blue': (240, 247, 255),
+    'tint_green': (240, 253, 244),
+
+    # UI colors
+    'border': (69, 69, 69),
+    'shadow': (69, 69, 69),
+    'text_primary': (45, 45, 45),
+    'text_secondary': (66, 66, 66),
+
+    # Semantic
+    'success': (129, 199, 132),
+    'white': (255, 255, 255),
+    'black': (0, 0, 0),
+}
+```
+
+### 2. Asset Size Definitions
+
+```python
+ASSET_SIZES = {
+    # iOS
+    'iphone_6.7': (1284, 2778),
+    'iphone_6.5': (1242, 2688),
+    'iphone_5.5': (1242, 2208),
+    'ipad_12.9': (2048, 2732),
+    'ipad_11': (1668, 2388),
+
+    # IAP
+    'iap_promo': (1024, 1024),
+
+    # Google Play
+    'google_play': (1080, 1920),
+    'feature_graphic': (1024, 500),
+
+    # Social
+    'social_square': (1080, 1080),
+}
+```
+
+### 3. Marketing Text Presets
+
+Define reusable marketing copy:
+
+```python
+MARKETING_PRESETS = {
+    'home': {
+        'headline': 'Your Journey Starts Here',
+        'subtext': 'Experience the app',
+    },
+    'feature1': {
+        'headline': 'Key Feature Name',
+        'subtext': 'Brief benefit description',
+    },
+    'upgrade': {
+        'headline': 'Unlock Everything',
+        'subtext': 'Premium features await',
+    },
+    # Add more presets for your app...
+}
+```
+
+### 4. Background Styles
+
+Available background generators:
+
+| Style | Description |
+|-------|-------------|
+| `gradient` | Smooth vertical color gradient |
+| `wave` | Gradient with decorative wave patterns |
+| `blob` | Soft organic blob shapes |
+| `geometric` | Geometric circle patterns |
+| `dots` | Polka dot pattern |
+| `diamonds` | Diamond grid pattern |
+| `shapes` | Gradient with floating rounded rectangles |
+| `split` | Split color with curved divider |
+| `auto` | Automatically varies based on position |
+
+### 5. Text Styles
+
+| Style | Description |
+|-------|-------------|
+| `banner` | Text in Neo-Brutalist banner with shadow |
+| `underline` | Bold text with decorative underline |
+| `badge` | Text with star icon |
+| `floating` | 3D floating text effect |
+| `outlined` | Text with thick outline |
+| `simple` | Clean text with drop shadow |
+| `auto` | Automatically varies |
+
+### 6. Device Frame Styles
+
+| Style | Description |
+|-------|-------------|
+| `flat` | Standard flat with retro border |
+| `tilt-right` | Tilted 6° right for dynamic look |
+| `tilt-left` | Tilted 6° left |
+| `tilt-slight` | Subtle 3° tilt |
+| `auto` | Varies based on screenshot position |
+
+---
+
+## Screenshot Strategy (ASO)
+
+### A.I.D.A. Framework
+
+App Store Optimization follows the A.I.D.A. marketing framework:
+
+1. **Attention** (Screenshot 1) - Hero shot with core value proposition
+2. **Interest** (Screenshots 2-3) - Show the main interaction/experience
+3. **Desire** (Screenshots 4-6) - Features that create want
+4. **Action** (Screenshots 7-10) - Call to action, social proof
+
+### Critical First Three
+
+**The first 3 screenshots appear in search results** - users make a 7-second decision. These must:
+- Clearly communicate the app's purpose
+- Show the core user experience
+- Use bold, readable headlines
+
+### Recommended Screenshot Sequence
+
+```python
+SCREENSHOT_SEQUENCE = [
+    # Position 1: ATTENTION - First impression
+    {
+        'folder': '01-home',
+        'headline': 'Your Value Proposition',
+        'subtext': 'Supporting text',
+        'theme': 'primary',
+    },
+
+    # Position 2-3: INTEREST - Core experience
+    {
+        'folder': '02-main-feature',
+        'headline': 'Main Feature',
+        'theme': 'secondary',
+    },
+    {
+        'folder': '03-key-screen',
+        'headline': 'Key Benefit',
+        'theme': 'success',
+    },
+
+    # Position 4-6: DESIRE - Features
+    {
+        'folder': '04-feature-a',
+        'headline': 'Feature A',
+        'theme': 'primary',
+    },
+    # ... more features
+
+    # Position 7-10: ACTION - CTA
+    {
+        'folder': '08-upgrade',
+        'headline': 'Unlock Everything',
+        'theme': 'accent',
+    },
+]
+```
+
+### Screenshot Capture Tips
+
+**Before capturing:**
+1. Disable debug mode/ribbons
+2. Set up impressive but realistic data
+3. Clear notifications
+4. Use neutral time (9:41 AM is Apple's standard)
+
+**Device recommendations:**
+- iPhone 15 Pro Max for 6.7" native captures
+- iPad Pro 12.9" for iPad native captures
+- Simulator for precise custom sizes
+
+**Simulator capture command:**
+```bash
+xcrun simctl io booted screenshot screenshot.png
+```
+
+---
+
+## App Icon Generation
+
+### Master Icon Requirements
+
+- **Size:** 1024 × 1024 pixels minimum
+- **Format:** PNG (recommended) or SVG
+- **Shape:** Square with full bleed (no rounded corners - OS applies mask)
+- **Transparency:** No transparency for iOS icons
+
+### Generated Sizes
+
+The pipeline generates all required sizes from the master:
+
+```python
+APP_ICON_SIZES = {
+    # iOS App Store
+    'app_store': 1024,
+
+    # iOS Device Icons
+    'iphone_180': 180,   # @3x
+    'iphone_120': 120,   # @2x
+    'ipad_167': 167,     # iPad Pro
+    'ipad_152': 152,     # iPad
+
+    # Notification
+    'notification_60': 60,
+    'notification_40': 40,
+
+    # Settings
+    'settings_87': 87,
+    'settings_58': 58,
+    'settings_29': 29,
+
+    # Spotlight
+    'spotlight_120': 120,
+    'spotlight_80': 80,
+
+    # macOS
+    'mac_512': 512,
+    'mac_256': 256,
+    'mac_128': 128,
+    'mac_64': 64,
+    'mac_32': 32,
+    'mac_16': 16,
+}
+```
+
+### iOS Asset Catalog
+
+The generator creates a ready-to-use Xcode asset catalog:
+
+```
+output/icons/AppIcon.appiconset/
+├── Contents.json          # Xcode configuration
+├── AppIcon-1024.png       # App Store
+├── AppIcon-60@3x.png      # iPhone
+├── AppIcon-60@2x.png
+├── AppIcon-83.5@2x.png    # iPad Pro
+├── AppIcon-76@2x.png      # iPad
+└── ...
+```
+
+**Copy to Xcode project:**
+```bash
+cp -r img-tools/output/icons/AppIcon.appiconset ios/Runner/Assets.xcassets/
+```
+
+---
+
+## Implementation Guide
+
+### Step 1: Install Dependencies
+
+```bash
+pip install Pillow
+
+# Optional: For SVG support
+pip install cairosvg
+# macOS may need: brew install cairo
+```
+
+### Step 2: Set Up Directory Structure
+
+```bash
+mkdir -p img-tools/{fonts,icons,input,output}
+mkdir -p img-tools/input/{01-home,02-feature,03-results}
+```
+
+### Step 3: Add Custom Fonts (Recommended)
+
+Download fonts that match your app's typography and place in `img-tools/fonts/`:
+- [Space Grotesk](https://fonts.google.com/specimen/Space+Grotesk)
+- [Inter](https://rsms.me/inter/)
+
+### Step 4: Customize Color Palette
+
+Edit `generate_store_assets.py` and update the `COLORS` dictionary to match your app.
+
+### Step 5: Create Master Icon
+
+Place your 1024×1024 app icon in `img-tools/icons/app_icon_1024.png`
+
+### Step 6: Capture Screenshots
+
+Capture screenshots from your app and place in numbered input folders.
+
+### Step 7: Configure Screenshot Sequence
+
+Edit `batch_generate.py` to define your screenshot sequence with appropriate headlines and themes.
+
+### Step 8: Generate Assets
+
+```bash
+cd img-tools
+
+# Generate all screenshots
+python batch_generate.py
+
+# Preview without generating
+python batch_generate.py --dry-run
+
+# Generate app icons
+python generate_store_assets.py --icon
+
+# Generate single screenshot
+python generate_store_assets.py input/01-home/screenshot.png "Headline" --subtext "Subtext"
+```
+
+---
+
+## CI/CD Integration
+
+### Xcode Cloud (iOS)
+
+The asset pipeline runs locally before commit. For Xcode Cloud builds, ensure:
+
+1. **Generated icons are committed** to `ios/Runner/Assets.xcassets/AppIcon.appiconset/`
+
+2. **ci_post_clone.sh** exists for Flutter projects:
+```bash
+#!/bin/sh
+# ios/ci_scripts/ci_post_clone.sh
+set -e
+cd "$CI_PRIMARY_REPOSITORY_PATH"
+git clone https://github.com/flutter/flutter.git --depth 1 -b stable "$HOME/flutter"
+export PATH="$PATH:$HOME/flutter/bin"
+flutter pub get
+flutter build ios --release --no-codesign
+cd ios && pod install
+```
+
+### GitHub Actions (Optional)
+
+```yaml
+# .github/workflows/generate-assets.yml
+name: Generate Store Assets
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'img-tools/input/**'
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install Pillow
+
+      - name: Generate assets
+        run: |
+          cd img-tools
+          python batch_generate.py
+
+      - name: Commit generated assets
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add img-tools/output/
+          git commit -m "chore: regenerate store assets" || exit 0
+          git push
+```
+
+---
+
+## Quick Reference Commands
+
+```bash
+# Generate all screenshots (batch mode)
+python batch_generate.py
+
+# Preview what would be generated
+python batch_generate.py --dry-run
+
+# Generate app icons
+python generate_store_assets.py --icon
+
+# Generate with specific design
+python generate_store_assets.py --icon --icon-design pixel
+
+# List available icon designs
+python generate_store_assets.py --list-icons
+
+# Generate single screenshot
+python generate_store_assets.py screenshot.png "Headline" -s "Subtext"
+
+# Use preset
+python generate_store_assets.py screenshot.png --preset home
+
+# Specific theme and style
+python generate_store_assets.py screenshot.png "Title" --theme success --bg wave --style banner
+
+# List all options
+python generate_store_assets.py --list-styles
+python generate_store_assets.py --list-presets
+python generate_store_assets.py --list-sizes
+```
+
+---
+
+## Checklist for New Projects
+
+- [ ] Create `img-tools/` directory structure
+- [ ] Copy and customize `generate_store_assets.py`
+- [ ] Copy and customize `batch_generate.py`
+- [ ] Update `COLORS` to match app palette
+- [ ] Add custom fonts to `fonts/`
+- [ ] Create 1024×1024 master app icon
+- [ ] Define `MARKETING_PRESETS` for your app
+- [ ] Configure `SCREENSHOT_SEQUENCE` in batch script
+- [ ] Capture raw screenshots to input folders
+- [ ] Run `batch_generate.py` to create all assets
+- [ ] Copy generated icons to Xcode/Android project
+- [ ] Upload screenshots to App Store Connect / Google Play Console
+
+---
+
+## Troubleshooting
+
+### Fonts not loading
+- Ensure TTF files are in `img-tools/fonts/`
+- Check file permissions
+- Verify font names match what the script expects
+
+### SVG icons not rendering
+- Install cairosvg: `pip install cairosvg`
+- On macOS: `brew install cairo`
+- Alternative: Pre-render to PNG and use as master
+
+### Colors look wrong
+- Verify RGB values (not hex)
+- Check color profile (sRGB recommended)
+- Ensure PNG output, not JPEG
+
+### Screenshots cropped incorrectly
+- Check source screenshot dimensions
+- Verify ASSET_SIZES match platform requirements
+- Adjust scaling logic if needed
