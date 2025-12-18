@@ -15,379 +15,674 @@ Use this pipeline pattern when the user needs to:
 
 ## Pipeline Architecture
 
-Build these 7 components in order:
+Build these components in order. Note that **Enrichment is optional** - not all pipelines need external API data.
 
 ```
-1. SETUP → 2. DISCOVERY → 3. EVALUATION → 4. EXTRACTION → 5. ENRICHMENT → 6. VALIDATION → 7. MAINTENANCE
+1. SETUP → 2. DISCOVERY → 3. EVALUATION → 4. EXTRACTION → 5. [ENRICHMENT] → 6. VALIDATION → 7. MAINTENANCE
+                                                              (optional)
 ```
+
+| Stage | Script | Purpose | Required? |
+|-------|--------|---------|-----------|
+| Setup | - | Create structure, config files | Yes |
+| Discovery | `search.js` | Find candidate URLs via Google Search API | Yes |
+| Evaluation | `fetch-page.js` | Crawl websites with Playwright | Yes |
+| Extraction | (manual) | Human reviews, creates records | Yes |
+| Enrichment | `enrich.js` | Add external API data (Places, etc.) | **Optional** |
+| Validation | `audit.js` | Flag incomplete records | Yes |
+| Maintenance | `sync-processed.js` | Track domains, prevent duplicates | Yes |
+
+---
+
+## Before Building: Key Decisions
+
+**Ask the user these questions before writing any code:**
+
+### 1. What Are You Looking For?
+
+Define **inclusion criteria** clearly:
+- What qualifies as a valid listing?
+- What specifically disqualifies a result?
+- Are you looking for specific features, offers, or attributes?
+
+**Example (homeschool deals):**
+```
+INCLUDE: Establishments offering incentives to homeschoolers
+  - Homeschool discounts
+  - Homeschool days/events
+  - Homeschool-specific programs
+
+EXCLUDE:
+  - Co-ops (families teaching each other)
+  - Generic programs without homeschool incentives
+  - Aggregator/directory sites
+```
+
+### 2. Geographic Scope
+
+- What states/regions do you cover?
+- What metro areas within each state?
+- What cities within each metro?
+
+### 3. Categories (if applicable)
+
+- How should records be organized?
+- What search terms help find each category?
+
+### 4. Do You Need Enrichment?
+
+**This is the most important optional decision.** Ask the user:
+
+| Need | Use Enrichment | Skip Enrichment |
+|------|----------------|-----------------|
+| Verified addresses & coordinates | Yes | No |
+| Business hours | Yes | No |
+| Google ratings/reviews | Yes | No |
+| Online-only businesses | No | Yes |
+| Address from website is sufficient | No | Yes |
+| Cost-sensitive project | No | Yes |
+
+**When to recommend enrichment:**
+- Building a map-based directory
+- Need verified business hours for display
+- Want to show ratings/review counts
+- Need lat/lng for distance calculations
+
+**When to skip enrichment:**
+- Website already provides good address data
+- Listings are events, not physical locations
+- Online-only or nationwide services
+- Budget constraints (API costs)
+- Pilot/MVP phase - can add later
 
 ---
 
 ## Step 1: Create Project Structure
 
-Create this directory structure:
-
 ```
-{project}/
-├── scripts/                    # One script per pipeline stage
+{project}/content-pipeline/
+├── scripts/
+│   ├── search.js              # Google Search API discovery
+│   ├── fetch-page.js          # Playwright web scraper
+│   ├── audit.js               # Record validation
+│   ├── sync-processed.js      # Domain deduplication
+│   └── enrich.js              # (Optional) External API enrichment
 ├── data/
-│   ├── reference.json          # Lookup data (cities, categories, etc.)
-│   ├── blacklist.json          # Domains/entities to exclude
-│   ├── candidates.json         # Discovered URLs with status
-│   ├── processed.json          # Domains already handled (for deduplication)
-│   └── records/
-│       └── {CATEGORY}/         # Final records organized by category
-│           └── {slug}.json
-├── .env                        # API keys (add to .gitignore)
-└── package.json
+│   ├── regions.json           # Geographic coverage + categories
+│   ├── blacklist.json         # Domains/patterns to exclude
+│   ├── candidates.json        # Discovered URLs with status
+│   ├── processed-domains.json # Domains already handled
+│   ├── audit-report.json      # Generated audit results
+│   └── drafts/                # Draft records for review
+├── .env                       # API keys (add to .gitignore)
+├── .env.example               # API key template
+├── package.json
+├── README.md
+└── MVP.md                     # Implementation spec
 ```
 
-**Create package.json:**
-- Set `"type": "module"` for ES modules
-- Add dependencies: `playwright`, `dotenv`
-
-**Create .env with required API keys:**
-- `SEARCH_API_KEY` - Google Custom Search API
-- `SEARCH_ENGINE_ID` - Custom Search Engine ID
-- `ENRICHMENT_API_KEY` - Google Places API (or similar)
-
----
-
-## Step 2: Build the Blacklist
-
-Create `data/blacklist.json` to filter unwanted results.
-
-**Structure:**
+**package.json:**
 ```json
 {
-  "domains": ["specific-domain-to-block.com"],
-  "patterns": ["yelp.com", "facebook.com", "yellowpages.com"],
-  "reasons": {
-    "specific-domain.com": "Why this is excluded"
+  "name": "content-pipeline",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "search": "node --env-file=.env scripts/search.js",
+    "fetch": "node scripts/fetch-page.js",
+    "audit": "node scripts/audit.js",
+    "sync": "node scripts/sync-processed.js"
+  },
+  "dependencies": {
+    "playwright": "^1.40.0"
   }
 }
 ```
 
-**What to include:**
-- National chains (if looking for local businesses)
-- Aggregator/directory sites
-- Lead generation sites
-- Social media platforms
-- Review sites (Yelp, Google reviews pages)
+**.env.example:**
+```bash
+# Required
+GOOGLE_SEARCH_API_KEY=your_api_key_here
+GOOGLE_SEARCH_ENGINE_ID=your_engine_id_here
 
-Ask the user what types of entities should be excluded for their use case.
+# Optional - only if using enrichment
+GOOGLE_PLACES_API_KEY=your_places_key_here
+```
+
+**API credentials:**
+- Search API Key: https://console.cloud.google.com/apis/credentials
+- Search Engine: https://programmablesearchengine.google.com/
+- Places API: https://console.cloud.google.com/apis/library/places-backend.googleapis.com
+
+---
+
+## Step 2: Build Configuration Files
+
+### `data/regions.json`
+
+Define geographic coverage and categories.
+
+```json
+{
+  "regions": {
+    "metro-slug": {
+      "name": "Display Name",
+      "cityArea": "metro-slug",
+      "state": "state-slug",
+      "cities": ["City1", "City2", "City3"]
+    }
+  },
+  "categories": [
+    {
+      "name": "Category Name",
+      "slug": "category-slug",
+      "terms": ["search term 1", "search term 2", "search term 3"]
+    }
+  ],
+  "searchKeywords": [
+    "primary search keyword",
+    "alternate keyword",
+    "another variant"
+  ]
+}
+```
+
+### `data/blacklist.json`
+
+Domains and URL patterns to exclude.
+
+```json
+{
+  "domains": [
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "yelp.com",
+    "tripadvisor.com",
+    "yellowpages.com",
+    "aggregator-site.com"
+  ],
+  "urlPatterns": [
+    "/review",
+    "/listing/",
+    "/directory/",
+    "/business/"
+  ],
+  "reasons": {
+    "aggregator-site.com": "Aggregator - not primary source"
+  }
+}
+```
+
+**Common blacklist domains by category:**
+
+| Category | Domains |
+|----------|---------|
+| Social | facebook.com, instagram.com, twitter.com, linkedin.com, tiktok.com |
+| Reviews | yelp.com, tripadvisor.com, bbb.org |
+| Directories | yellowpages.com, manta.com, chamberofcommerce.com |
+| Deals | groupon.com, retailmenot.com, slickdeals.net |
+| Events | eventbrite.com, meetup.com |
+| Jobs | indeed.com, glassdoor.com |
 
 ---
 
 ## Step 3: Build the Search Script
 
-Create a script that discovers candidate URLs via Google Custom Search API.
+**File:** `scripts/search.js`
 
-**Required functionality:**
+**Usage:**
+```bash
+node --env-file=.env scripts/search.js "City" ST
+node --env-file=.env scripts/search.js "City" ST --category="Category"
+node --env-file=.env scripts/search.js "City" ST --pages=3
+```
 
-1. **Accept CLI arguments:** Category (required), SubCategory (optional)
+**Key features:**
+
+1. **Load filters before searching:**
+   - Read `blacklist.json` for exclusions
+   - Read `processed-domains.json` for already-handled domains
+   - Read `regions.json` for category search terms
+
+2. **Build focused search queries:**
+   ```javascript
+   // High-intent queries with primary keywords
+   `"${keyword}" "${city}" ${state}`
+   `intitle:${keyword} "${city}" ${state}`
+
+   // Category-specific queries
+   `"${keyword}" "${categoryTerm}" "${city}" ${state}`
    ```
-   node search.js TX Houston
-   ```
 
-2. **Load filters before searching:**
-   - Read `blacklist.json`
-   - Read `processed.json` (domains already handled)
-
-3. **Build multiple search queries** to maximize coverage:
-   - Include location terms
-   - Include business-type keywords
-   - Use variations: "local", "independent", "family owned"
-   - Example: `"Houston TX" local dumpster rental family owned`
-
-4. **Execute paginated searches:**
-   - Use Google Custom Search API endpoint
+3. **Execute paginated searches:**
+   - Use Google Custom Search API
    - Fetch 2-3 pages per query (10 results each)
-   - Add 500ms delay between requests
+   - **Rate limit: 500ms+ between requests**
 
-5. **Filter and deduplicate results:**
-   - Extract domain from each URL (remove `www.`)
-   - Skip if domain is in blacklist
-   - Skip if domain is in processed.json
-   - Skip if domain already seen this session
+4. **Filter and deduplicate:**
+   - Extract domain from URL (remove `www.`)
+   - Skip blacklisted domains
+   - Skip processed domains
+   - Skip duplicates within session
+   - Prefer specific URLs over root domains
 
-6. **Save candidates to `data/candidates.json`:**
+5. **Check for existing records:**
+   - Match by domain against existing record files
+   - Mark as "update" if exists, "create" if new
+
+6. **Save candidates:**
    ```json
    {
-     "url": "https://example.com",
+     "url": "https://example.com/specific-page",
      "domain": "example.com",
      "title": "Search result title",
      "snippet": "Search snippet text",
-     "searchedCategory": "TX",
-     "searchedSubCategory": "Houston",
+     "city": "Dallas",
+     "state": "TX",
+     "category": "Museums",
      "status": "pending",
-     "addedAt": "2024-01-15T10:30:00Z"
+     "verdict": "pending",
+     "reason": null,
+     "existingListing": null,
+     "action": "create",
+     "addedAt": "2025-01-01T00:00:00.000Z"
    }
    ```
 
-7. **Merge with existing candidates** (don't overwrite, append new)
+**Status flow:**
+```
+pending → processed (qualifies/not_qualified)
+              ↓
+      skipped (with reason)
+```
 
 ---
 
 ## Step 4: Build the Web Scraper
 
-Create a Playwright-based scraper to extract content from candidate websites.
+**File:** `scripts/fetch-page.js`
 
-**Required functionality:**
+**Usage:**
+```bash
+node scripts/fetch-page.js https://example.com/target-page
+```
 
-1. **Accept URL as CLI argument:**
+**Key features:**
+
+1. **Configure Playwright:**
+   - Headless chromium
+   - Realistic user agent
+   - 30 second timeout
+
+2. **Multi-page crawl strategy:**
+
+   Start at the discovered URL (your target page), then crawl:
+   - Homepage (company info)
+   - About page (background, year founded)
+   - Contact page (phone, email, address)
+   - Programs/pricing page (offerings, costs)
+
+3. **Page pattern matching:**
+   ```javascript
+   const PAGE_PATTERNS = {
+     home: [/^\/?$/, /^\/?(index|home)/i],
+     contact: [/contact/i, /reach-us/i, /get-in-touch/i],
+     about: [/about/i, /who-we-are/i, /our-story/i],
+     programs: [/program/i, /pricing/i, /services/i, /schedule/i]
+   };
    ```
-   node fetch-page.js https://example.com
-   ```
 
-2. **Configure Playwright browser:**
-   - Use chromium in headless mode
-   - Set realistic user agent
-   - Set 30 second timeout
-
-3. **Fetch multiple pages per site:**
-   - Main/home page
-   - Contact page (find link matching `/contact|get.?in.?touch/i`)
-   - About page (find link matching `/about|who.?we.?are|our.?story/i`)
-   - Services/pricing page (find link matching `/services|pricing|products/i`)
-   - Add 1 second delay between pages
-
-4. **Clean extracted content:**
+4. **Content extraction:**
    - Remove script, style, noscript, iframe, svg tags
-   - Extract text from main content area
+   - Extract main content area text
    - Normalize whitespace
-   - Limit to 50,000 characters per page
+   - Limit to 50,000 chars per page
 
-5. **Extract structured data using regex:**
-   - Phone: `(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})`
-   - Email: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`
-   - Address: Pattern matching street + city + state + zip
+5. **Contact info extraction (regex):**
+   ```javascript
+   // Phone
+   /\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g
 
-6. **Output results to console** for human review:
-   - Show content from each page (truncated)
-   - Show extracted phones, emails, addresses
-   - Human decides if candidate qualifies
+   // Email
+   /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g
 
----
-
-## Step 5: Define the Record Schema
-
-Create `data/schema.json` defining the final record structure.
-
-**Ask the user what fields they need.** Common fields include:
-
-**Required fields:**
-- `slug` - URL-friendly identifier (kebab-case)
-- `name` - Entity name
-- `primaryCity` - Main location
-- `state` - State/region code
-- `website` - Full URL
-- `domain` - Domain only (for deduplication)
-
-**Optional fields:**
-- `phone`, `email`, `address`
-- `description` - Summary text
-- `yearFounded`
-- `serviceAreas` - Array of locations served
-- `tags` - Categorization array
-- `externalRating`, `reviewCount` - From enrichment
-- `needsReview`, `reviewIssues` - From auditing
-
-**Slug format:** `{name-kebab}-{city}-{state}`
-Example: `joes-dumpsters-houston-tx`
-
----
-
-## Step 6: Build the Enrichment Script
-
-Create a script that adds external data (ratings, reviews) to records.
-
-**Required functionality:**
-
-1. **Accept filtering options:**
-   ```
-   node enrich.js --category TX
-   node enrich.js --file path/to/record.json
-   node enrich.js --stale 30  # Only records older than 30 days
+   // Address (customize states)
+   /\d+\s+[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|...)[\w\s,#.-]*(?:TX|FL|CA|...)[\s,]*\d{5}/gi
    ```
 
-2. **Iterate through records to process**
-
-3. **Query external API** (e.g., Google Places):
-   - Build query: `"{name} {city} {state}"`
-   - Find best match (exact name + city match preferred)
-
-4. **Add enrichment fields:**
-   - `externalRating` - 1-5 rating
-   - `reviewCount` - Number of reviews
-   - `externalId` - ID for future lookups
-   - `externalUrl` - Link to external profile
-   - `enrichedAt` - Date stamp
-
-5. **Rate limit:** 1 second between API calls
-
-6. **Save updated record back to file**
+6. **Output for human review:**
+   - Content from each page (truncated)
+   - Extracted phones, emails, addresses
+   - Pages crawled list
+   - Keyword validation (did we find expected terms?)
 
 ---
 
-## Step 7: Build the Audit Script
+## Step 5: Define Record Schema
 
-Create a script that validates records and flags issues.
+Define what fields a record should have. **Customize for your use case.**
 
-**Required functionality:**
+**Minimum required fields:**
+```json
+{
+  "slug": "company-name",
+  "company": "Company Name",
+  "website": "https://example.com/specific-page",
+  "createdAt": "2025-01-01",
+  "updatedAt": "2025-01-01"
+}
+```
 
-1. **Define audit rules by severity:**
+**Location fields (for local businesses):**
+```json
+{
+  "nationwide": false,
+  "state": "texas",
+  "cityArea": "dallas-fort-worth",
+  "city": "dallas",
+  "location": "Dallas, TX",
+  "address": "123 Main St, Dallas, TX 75001"
+}
+```
 
-   **Critical (unusable record):**
-   - Missing phone number
+**Contact fields:**
+```json
+{
+  "phone": "(555) 123-4567",
+  "email": "contact@example.com"
+}
+```
+
+**Content fields:**
+```json
+{
+  "title": "Listing Title",
+  "shortSummary": "Brief description (10-200 chars)",
+  "description": "Full description (100+ chars)",
+  "tags": [],
+  "activities": []
+}
+```
+
+**Enrichment fields (optional - only if using Places API):**
+```json
+{
+  "externalRating": 4.5,
+  "reviewCount": 127,
+  "placeId": "ChIJ...",
+  "coordinates": { "lat": 32.7767, "lng": -96.7970 },
+  "enrichedAt": "2025-01-01"
+}
+```
+
+**Audit fields (auto-added):**
+```json
+{
+  "needsReview": false,
+  "reviewIssues": [],
+  "lastAuditDate": "2025-01-01"
+}
+```
+
+---
+
+## Step 6: Build the Audit Script
+
+**File:** `scripts/audit.js`
+
+**Usage:**
+```bash
+node scripts/audit.js              # Apply audit flags
+node scripts/audit.js --dry-run    # Report only
+```
+
+**Key features:**
+
+1. **Define severity levels:**
+
+   | Severity | Meaning | Action |
+   |----------|---------|--------|
+   | critical | Unusable record | Must fix |
+   | warning | Should fix | Review soon |
+   | info | Nice to have | Low priority |
+
+2. **Define audit rules:**
+
+   **Critical:**
    - Missing website
+   - Missing company/name
+   - Missing slug
 
-   **Warning (should fix):**
-   - Missing/incomplete address
-   - Missing external rating
+   **Warning:**
+   - Missing phone
+   - Missing address
+   - Description too short (< 100 chars)
+   - Missing category/type
+   - Using root domain URL (should use specific page)
+
+   **Info:**
    - Missing email
-   - Description too short (< 50 chars)
-   - Too few service areas (< 3)
+   - Missing scheduling info
+   - Missing cost info
 
-   **Info (nice to have):**
-   - Missing year founded
-   - Short description (< 200 chars)
-
-2. **Support dry-run mode:**
+3. **Update records with audit flags:**
+   ```json
+   {
+     "needsReview": true,
+     "reviewIssues": [
+       { "severity": "warning", "field": "phone", "message": "Missing phone number" }
+     ],
+     "lastAuditDate": "2025-01-01"
+   }
    ```
-   node audit.js --dry-run
-   ```
 
-3. **For each record:**
-   - Run all audit rules
-   - Set `needsReview: true` if any critical/warning issues
-   - Set `reviewIssues` array with severity, field, message
-   - Set `lastAuditDate`
-
-4. **Generate audit report** (`data/audit-report.json`):
-   - Summary: total, needs review count, issues by severity
-   - Breakdown by category
+4. **Generate audit report:**
+   - Summary: total, clean, needs review
+   - Issues by severity
+   - Breakdown by state/category
    - List of records with issues
 
 ---
 
-## Step 8: Build the Deduplication Tracker
+## Step 7: Build the Deduplication Tracker
 
-Create a script that syncs processed domains.
+**File:** `scripts/sync-processed.js`
 
-**Required functionality:**
+**Usage:**
+```bash
+node scripts/sync-processed.js
+```
+
+**Key features:**
 
 1. **Collect domains from:**
-   - All records in `data/records/` (use `domain` field or extract from `website`)
-   - Candidates in `candidates.json` with status "processed" or "skipped"
+   - All records (extract from `website` field)
+   - Candidates with status "processed" or "skipped"
 
-2. **Deduplicate and sort**
+2. **Normalize domains:**
+   - Remove `www.` prefix
+   - Lowercase
 
-3. **Save to `data/processed.json`** (simple array of domains)
-
-4. **Run this before search operations** to prevent re-discovering known domains
-
----
-
-## Step 9: Build the Migration Script
-
-Create a script for schema updates to existing records.
-
-**Required functionality:**
-
-1. **Define migrations as functions:**
-   ```javascript
-   const MIGRATIONS = [
-     {
-       name: 'rename-field',
-       migrate: (record) => {
-         if (record.oldField) {
-           record.newField = record.oldField;
-           delete record.oldField;
-         }
-         return record;
-       }
-     }
-   ];
+3. **Save to `data/processed-domains.json`:**
+   ```json
+   ["domain1.com", "domain2.com", "domain3.com"]
    ```
 
-2. **Support dry-run mode**
-
-3. **Apply all migrations to all records**
-
-4. **Only save if record actually changed**
+4. **Run before search operations** to prevent re-discovering known domains
 
 ---
 
-## Workflow Instructions
+## Step 8 (Optional): Build Enrichment Script
+
+**Only implement this if the user needs verified location data, ratings, or business hours.**
+
+**File:** `scripts/enrich.js`
+
+**Usage:**
+```bash
+node --env-file=.env scripts/enrich.js --category texas
+node --env-file=.env scripts/enrich.js --file path/to/record.json
+node --env-file=.env scripts/enrich.js --stale 30  # Re-enrich after 30 days
+```
+
+**Key features:**
+
+1. **Query Google Places API:**
+   - Build query: `"${company}" ${city} ${state}`
+   - Find best match by name similarity
+
+2. **Add enrichment fields:**
+   ```json
+   {
+     "placeId": "ChIJ...",
+     "externalRating": 4.5,
+     "reviewCount": 127,
+     "coordinates": { "lat": 32.7767, "lng": -96.7970 },
+     "formattedAddress": "Verified address from Google",
+     "businessHours": { ... },
+     "enrichedAt": "2025-01-01"
+   }
+   ```
+
+3. **Rate limit:** 1 second between API calls
+
+4. **Cost awareness:**
+   - Places API charges per request
+   - Consider caching results
+   - Only enrich when necessary
+
+---
+
+## Workflow Guide
 
 ### Initial Setup
+
 ```bash
+cd content-pipeline
 npm install
-# Create .env with API keys
-# Create blacklist.json with exclusions
-node sync-processed.js  # Initialize tracker
+cp .env.example .env
+# Edit .env with API keys
+
+node scripts/sync-processed.js  # Initialize domain tracker
 ```
 
-### Discovery Cycle
+### Daily Discovery Workflow
+
 ```bash
-node search.js CATEGORY [SUBCATEGORY]
-# Review candidates.json
-node fetch-page.js <URL>  # Evaluate each candidate
-# If qualifies: create record file in data/records/CATEGORY/
-# Update candidate status to "processed" or "skipped"
+# 1. Search for candidates
+node --env-file=.env scripts/search.js "Dallas" TX
+
+# 2. Review candidates.json, identify promising ones
+
+# 3. Fetch details for each candidate
+node scripts/fetch-page.js https://museum.com/homeschool-day
+
+# 4. Review output, decide if it qualifies
+
+# 5. If qualifies: create record in appropriate location
+
+# 6. Update candidate status in candidates.json
 ```
 
-### Enrichment & Validation
+### Maintenance Workflow
+
 ```bash
-node enrich.js --category CATEGORY
-node audit.js --dry-run  # Preview issues
-node audit.js            # Apply audit flags
-# Review audit-report.json
-# Fix critical/warning issues manually
+# After adding records, update domain tracker
+node scripts/sync-processed.js
+
+# Audit all records for completeness
+node scripts/audit.js --dry-run  # Preview
+node scripts/audit.js            # Apply flags
+
+# Review audit-report.json, fix issues
 ```
 
-### Maintenance
+### Optional: Enrichment Workflow
+
 ```bash
-node sync-processed.js   # Update deduplication tracker
-node migrate.js          # Apply schema changes
+# Enrich records in a category
+node --env-file=.env scripts/enrich.js --category texas
+
+# Re-enrich stale records (older than 30 days)
+node --env-file=.env scripts/enrich.js --stale 30
 ```
 
 ---
 
-## Key Implementation Rules
+## Implementation Rules
 
-1. **Always rate limit API calls** - 500ms-1000ms between requests
-2. **Domain is the primary key** - One record per domain, deduplicate everywhere
+1. **Always rate limit** - 500ms-1000ms between API requests
+2. **Domain is the unique key** - One record per domain, deduplicate everywhere
 3. **Support incremental processing** - Filter by category, staleness, or single file
 4. **Always support dry-run** - Test before modifying files
-5. **Log errors but continue** - Don't stop batch processing on single failures
+5. **Log errors but continue** - Don't stop batch on single failures
 6. **Scripts must be idempotent** - Safe to re-run without side effects
-7. **Track timestamps** - When discovered, enriched, audited
+7. **Track timestamps** - When discovered, enriched, audited, updated
+8. **ES modules** - Use `"type": "module"` in package.json
+9. **No external dependencies** - Use built-in `fetch`, `fs`, `path`
+
+---
+
+## Common Issues & Solutions
+
+### Search Returns Too Many Irrelevant Results
+- Add more domains to blacklist
+- Use more specific search keywords
+- Use `intitle:` operator
+
+### Missing Contact Info from Scraper
+- Site may not have it publicly listed
+- Try additional page patterns
+- Check if info is in images (won't extract)
+- Consider Places API enrichment
+
+### Duplicate Records
+- Run sync-processed.js after adding records
+- Check candidates.json before creating new records
+- Domain is the unique identifier
+
+### Rate Limiting / Quota Errors
+- Google Custom Search: 100 queries/day (free tier)
+- Add longer delays between requests
+- Consider upgrading for higher volume
 
 ---
 
 ## Customization Checklist
 
-Before building, ask the user about:
+Before building, confirm with the user:
 
-1. **Target domain** - What type of entities are being collected?
-2. **Categories** - How should records be organized? (by state, type, etc.)
-3. **Required fields** - What data must each record have?
-4. **Quality criteria** - What makes a record "complete"?
-5. **Exclusion criteria** - What domains/types should be blacklisted?
-6. **Enrichment sources** - What external APIs to use for additional data?
-7. **Search keywords** - What terms find the target entities?
+- [ ] Inclusion/exclusion criteria defined
+- [ ] Geographic scope (states, metros, cities)
+- [ ] Categories and search terms
+- [ ] Record schema fields needed
+- [ ] Enrichment needed? (Places API)
+- [ ] Quality rules for audit
+- [ ] Blacklist domains identified
 
 ---
 
-## Example: Local Business Directory
+## Example Implementations
 
-For a directory of local businesses (like dumpster rental companies):
+### Homeschool Deals Directory
+- **Target:** Establishments offering homeschool incentives
+- **Regions:** Texas metros, Florida metros
+- **Categories:** Museums, Zoos, Farms, Sports, Arts
+- **Enrichment:** No (address from website sufficient)
+- **Keywords:** "homeschool day", "homeschool program", "homeschool discount"
+- **Live example:** [homeschooldeals.org](https://homeschooldeals.org)
 
-- **Categories:** US state abbreviations (TX, CA, NY)
-- **Blacklist:** National chains, franchise brands, aggregator sites
-- **Search queries:** `"{city} {state}" local {business type} family owned`
-- **Required fields:** name, city, state, phone, website
-- **Enrichment:** Google Places API for ratings
-- **Audit rules:** Must have phone, should have address and rating
+### Local Service Provider Directory
+- **Target:** Local independent businesses
+- **Regions:** Single state, multiple metros
+- **Categories:** By service type
+- **Enrichment:** Yes (need verified addresses, ratings)
+- **Keywords:** Service-specific terms + "local" + "family owned"
+
+### Event Venue Finder
+- **Target:** Venues hosting specific event types
+- **Regions:** National or regional
+- **Categories:** By venue type
+- **Enrichment:** Yes (need coordinates, capacity)
+- **Keywords:** Event-specific terms + venue types
