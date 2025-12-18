@@ -18,19 +18,27 @@ Use this pipeline pattern when the user needs to:
 Build these components in order. Note that **Enrichment is optional** - not all pipelines need external API data.
 
 ```
-1. SETUP → 2. DISCOVERY → 3. EVALUATION → 4. EXTRACTION → 5. [ENRICHMENT] → 6. VALIDATION → 7. MAINTENANCE
-                                                              (optional)
+1. SETUP → 2. DISCOVERY → 3. EVALUATE & CREATE → 4. [ENRICHMENT] → 5. VALIDATION → 6. MAINTENANCE
+                                                     (optional)
 ```
 
 | Stage | Script | Purpose | Required? |
 |-------|--------|---------|-----------|
 | Setup | - | Create structure, config files | Yes |
 | Discovery | `search.js` | Find candidate URLs via Google Search API | Yes |
-| Evaluation | `fetch-page.js` | Crawl websites with Playwright | Yes |
-| Extraction | (manual) | Human reviews, creates records | Yes |
+| Evaluate & Create | `fetch-page.js` | Crawl site, review output, create record | Yes |
 | Enrichment | `enrich.js` | Add external API data (Places, etc.) | **Optional** |
 | Validation | `audit.js` | Flag incomplete records | Yes |
 | Maintenance | `sync-processed.js` | Track domains, prevent duplicates | Yes |
+
+**How "Evaluate & Create" works with an agent:**
+1. Run `fetch-page.js` on a candidate URL
+2. Agent reviews the console output (content, contact info, pages crawled)
+3. Agent decides if it qualifies based on inclusion criteria
+4. If yes: Agent creates the record JSON file using extracted data
+5. Update candidate status in `candidates.json`
+
+This is not a separate script - the agent handles evaluation and record creation based on fetch-page output.
 
 ---
 
@@ -570,20 +578,18 @@ node scripts/sync-processed.js  # Initialize domain tracker
 ### Daily Discovery Workflow
 
 ```bash
-# 1. Search for candidates
+# 1. Search for candidates in a city
 node --env-file=.env scripts/search.js "Dallas" TX
 
-# 2. Review candidates.json, identify promising ones
-
-# 3. Fetch details for each candidate
+# 2. For each pending candidate, fetch and evaluate
 node scripts/fetch-page.js https://museum.com/homeschool-day
-
-# 4. Review output, decide if it qualifies
-
-# 5. If qualifies: create record in appropriate location
-
-# 6. Update candidate status in candidates.json
 ```
+
+**After fetch-page runs, the agent:**
+- Reviews the output (content from each page, extracted contact info)
+- Decides if the site qualifies based on inclusion criteria
+- If yes: Creates the record JSON file in the appropriate location
+- Updates the candidate status in `candidates.json` to "processed" with verdict
 
 ### Maintenance Workflow
 
