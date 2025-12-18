@@ -3,6 +3,8 @@
 
 This guide documents the complete setup for building Tauri apps for both the Microsoft Store and Mac App Store. Use this as a template for new projects to avoid chasing configuration issues.
 
+**Tested with**: FlowBatch, IronBase, Redstrings (December 2024)
+
 ---
 
 ## Table of Contents
@@ -23,29 +25,23 @@ This guide documents the complete setup for building Tauri apps for both the Mic
 your-app/
 ├── build_tools/
 │   ├── build-macos.sh          # Mac App Store build script
-│   ├── build-msix.ps1          # Windows Store build script
-│   └── sign-msix.ps1           # Windows local testing (optional)
+│   └── build-msix.ps1          # Windows Store build script
 ├── src-tauri/
 │   ├── tauri.conf.json
 │   ├── Cargo.toml
-│   ├── entitlements.plist      # Main app entitlements (Mac)
-│   ├── entitlements-sidecar.plist  # Sidecar entitlements (Mac)
-│   ├── entitlements-dev.plist  # Development entitlements (Mac, optional)
+│   ├── Entitlements.plist      # Main app entitlements (Mac)
+│   ├── entitlements-sidecar.plist  # Sidecar entitlements (Mac, if needed)
 │   ├── AppxManifest.xml        # Windows Store manifest
-│   ├── icons/
-│   │   ├── icon.icns           # Mac icon
-│   │   ├── icon.ico            # Windows icon
-│   │   ├── 32x32.png
-│   │   ├── 128x128.png
-│   │   ├── 128x128@2x.png
-│   │   ├── Square44x44Logo.png # Windows Store
-│   │   ├── Square150x150Logo.png
-│   │   └── StoreLogo.png
-│   └── binaries/               # Sidecar binaries
-│       ├── ffmpeg-aarch64-apple-darwin
-│       ├── ffmpeg-x86_64-apple-darwin
-│       ├── ffmpeg-x86_64-pc-windows-msvc.exe
-│       └── ... (other sidecars)
+│   └── icons/
+│       ├── icon.icns           # Mac icon (MUST include 1024x1024)
+│       ├── icon.ico            # Windows icon
+│       ├── icon.png            # Source icon (1024x1024)
+│       ├── 32x32.png
+│       ├── 128x128.png
+│       ├── 128x128@2x.png
+│       ├── Square44x44Logo.png # Windows Store
+│       ├── Square150x150Logo.png
+│       └── StoreLogo.png
 └── package.json
 ```
 
@@ -57,11 +53,11 @@ your-app/
 - Apple Developer Program membership ($99/year)
 - Xcode Command Line Tools: `xcode-select --install`
 - Two certificates in Keychain:
-  - `3rd Party Mac Developer Application: Your Name (TEAM_ID)`
-  - `3rd Party Mac Developer Installer: Your Name (TEAM_ID)`
+  - `3rd Party Mac Developer Application: Your Company (TEAM_ID)`
+  - `3rd Party Mac Developer Installer: Your Company (TEAM_ID)`
 - Provisioning profile from Apple Developer portal
 - Node.js 18+
-- Rust toolchain with targets:
+- Rust toolchain with universal target:
   ```bash
   rustup target add aarch64-apple-darwin x86_64-apple-darwin
   ```
@@ -76,9 +72,37 @@ your-app/
 
 ## Mac App Store Setup
 
-### 1. Create Entitlements Files
+### 1. Create Icons (CRITICAL)
 
-#### `src-tauri/entitlements.plist` (Main App)
+The Mac App Store **requires** a 1024x1024 icon (512pt @2x). Generate the `.icns` file properly:
+
+```bash
+cd src-tauri/icons
+
+# Start with a 1024x1024 source PNG
+mkdir -p icon.iconset
+sips -z 16 16 icon.png --out icon.iconset/icon_16x16.png
+sips -z 32 32 icon.png --out icon.iconset/icon_16x16@2x.png
+sips -z 32 32 icon.png --out icon.iconset/icon_32x32.png
+sips -z 64 64 icon.png --out icon.iconset/icon_32x32@2x.png
+sips -z 128 128 icon.png --out icon.iconset/icon_128x128.png
+sips -z 256 256 icon.png --out icon.iconset/icon_128x128@2x.png
+sips -z 256 256 icon.png --out icon.iconset/icon_256x256.png
+sips -z 512 512 icon.png --out icon.iconset/icon_256x256@2x.png
+sips -z 512 512 icon.png --out icon.iconset/icon_512x512.png
+sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
+iconutil -c icns icon.iconset -o icon.icns
+rm -rf icon.iconset
+```
+
+**Verify** your icns includes all sizes (should be ~100KB+, not ~48KB):
+```bash
+file icon.icns  # Should show multiple sizes
+```
+
+### 2. Create Entitlements File
+
+Save as `src-tauri/Entitlements.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -105,17 +129,18 @@ your-app/
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
 
-    <!-- Add other entitlements as needed:
+    <!-- Downloads folder access (optional) -->
     <key>com.apple.security.files.downloads.read-write</key>
     <true/>
-    -->
 </dict>
 </plist>
 ```
 
-**CRITICAL**: The `com.apple.application-identifier` and `com.apple.developer.team-identifier` are **required** for TestFlight/App Store. Without them, you'll get error 90886.
+**CRITICAL**: The `com.apple.application-identifier` and `com.apple.developer.team-identifier` are **required** for App Store. Without them, you'll get error 90886.
 
-#### `src-tauri/entitlements-sidecar.plist` (For bundled binaries like ffmpeg)
+### 3. Sidecar Entitlements (If Using External Binaries)
+
+If your app bundles sidecars like ffmpeg, create `src-tauri/entitlements-sidecar.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -133,18 +158,20 @@ your-app/
 </plist>
 ```
 
-**CRITICAL**: Sidecars need BOTH `app-sandbox` AND `inherit`. Just `inherit` alone will fail with App Store validation.
+**CRITICAL**: Sidecars need BOTH `app-sandbox` AND `inherit`. Just `inherit` alone will fail.
 
-### 2. Create Provisioning Profile
+### 4. Create Provisioning Profile
 
-1. Go to [Apple Developer Portal](https://developer.apple.com/account/resources/profiles/list)
-2. Create new profile:
-   - Type: **Mac App Store**
+1. Go to [Apple Developer Portal - Identifiers](https://developer.apple.com/account/resources/identifiers/list)
+2. Create an App ID with your bundle identifier
+3. Go to [Profiles](https://developer.apple.com/account/resources/profiles/list)
+4. Create new profile:
+   - Type: **Mac App Store Connect**
    - App ID: Your app's bundle identifier
    - Certificate: Select your "3rd Party Mac Developer Application" cert
-3. Download and save to `~/Downloads/YourApp_Mac_App_Store.provisionprofile`
+5. Download and save to `~/Downloads/YourApp_Mac_App_Store.provisionprofile`
 
-### 3. Mac Build Script Template
+### 5. Mac Build Script Template
 
 Save as `build_tools/build-macos.sh`:
 
@@ -235,6 +262,8 @@ fi
 echo -e "${BLUE}Building version: $VERSION${NC}"
 
 # Check prerequisites
+echo -e "${YELLOW}Checking prerequisites...${NC}"
+
 if [ ! -f "$PROVISIONING_PROFILE" ]; then
     echo -e "${RED}Error: Provisioning profile not found at $PROVISIONING_PROFILE${NC}"
     exit 1
@@ -245,10 +274,17 @@ if ! security find-identity -v -p codesigning | grep -q "$SIGNING_IDENTITY"; the
     exit 1
 fi
 
+if ! security find-identity -v | grep -q "$INSTALLER_IDENTITY"; then
+    echo -e "${RED}Error: Installer identity not found: $INSTALLER_IDENTITY${NC}"
+    exit 1
+fi
+
 # Build
 if [ "$SKIP_BUILD" = false ]; then
     echo -e "${YELLOW}Building Tauri app (universal binary)...${NC}"
     npm run tauri build -- --target $BUILD_TARGET
+    # Or for pnpm projects:
+    # pnpm tauri build --target $BUILD_TARGET
 else
     echo -e "${YELLOW}Skipping build (--skip-build)${NC}"
 fi
@@ -267,29 +303,35 @@ cp "$PROVISIONING_PROFILE" "$APP_PATH/Contents/embedded.provisionprofile"
 echo -e "${YELLOW}Removing quarantine attributes...${NC}"
 xattr -cr "$APP_PATH"
 
-# Sign sidecar binaries (if any)
+# Sign sidecar binaries (if any) - MUST BE DONE BEFORE main app
 SIDECAR_ENTITLEMENTS="$TAURI_DIR/entitlements-sidecar.plist"
 MACOS_DIR="$APP_PATH/Contents/MacOS"
 
-echo -e "${YELLOW}Signing sidecar binaries...${NC}"
-for sidecar in "$MACOS_DIR/ffmpeg" "$MACOS_DIR/ffprobe"; do  # Add your sidecars here
-    if [ -f "$sidecar" ]; then
-        echo "  Signing $(basename "$sidecar")..."
-        codesign --force --verify --verbose \
-            --sign "$SIGNING_IDENTITY" \
-            --identifier "$BUNDLE_ID.$(basename "$sidecar")" \
-            --entitlements "$SIDECAR_ENTITLEMENTS" \
-            "$sidecar"
-    fi
-done
+if [ -f "$SIDECAR_ENTITLEMENTS" ]; then
+    echo -e "${YELLOW}Signing sidecar binaries...${NC}"
+    for sidecar in "$MACOS_DIR/ffmpeg" "$MACOS_DIR/ffprobe"; do  # Add your sidecars
+        if [ -f "$sidecar" ]; then
+            echo "  Signing $(basename "$sidecar")..."
+            codesign --force --verify --verbose \
+                --sign "$SIGNING_IDENTITY" \
+                --identifier "$BUNDLE_ID.$(basename "$sidecar")" \
+                --entitlements "$SIDECAR_ENTITLEMENTS" \
+                "$sidecar"
+        fi
+    done
+fi
 
 # Sign main app bundle
 echo -e "${YELLOW}Signing main app bundle...${NC}"
 codesign --force --verify --verbose \
     --sign "$SIGNING_IDENTITY" \
     --identifier "$BUNDLE_ID" \
-    --entitlements "$TAURI_DIR/entitlements.plist" \
+    --entitlements "$TAURI_DIR/Entitlements.plist" \
     "$APP_PATH"
+
+# Verify signature
+echo -e "${YELLOW}Verifying signature...${NC}"
+codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 
 # Create installer package
 echo -e "${YELLOW}Creating installer package...${NC}"
@@ -306,8 +348,14 @@ echo ""
 echo -e "Version: ${BLUE}$VERSION${NC}"
 echo -e "Package: ${BLUE}$PKG_PATH${NC}"
 echo ""
-echo -e "Upload to App Store via Transporter app"
+echo -e "To upload to App Store:"
+echo -e "  1. Open Transporter"
+echo -e "  2. Drag the .pkg into Transporter"
+echo -e "  3. Click Deliver"
+echo ""
 ```
+
+Make executable: `chmod +x build_tools/build-macos.sh`
 
 ---
 
@@ -369,20 +417,6 @@ Save as `src-tauri/AppxManifest.xml`:
 - Update `Publisher` to match your Partner Center identity
 - Microsoft signs the package automatically - no certificate purchase needed
 
-### 2. Windows Build Script
-
-The `build_tools/build-msix.ps1` script handles:
-- Building the Tauri app
-- Packaging into MSIX format
-- Optional self-signing for local testing
-
-Usage:
-```powershell
-.\build_tools\build-msix.ps1              # Full build
-.\build_tools\build-msix.ps1 -SkipBuild   # Just repackage
-.\build_tools\build-msix.ps1 -SelfSign    # Sign for local testing
-```
-
 ---
 
 ## Tauri Configuration
@@ -397,7 +431,7 @@ Usage:
   "identifier": "com.yourcompany.yourapp",
   "build": {
     "beforeDevCommand": "npm run dev",
-    "devUrl": "http://localhost:1420",
+    "devUrl": "http://localhost:5173",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },
@@ -409,33 +443,28 @@ Usage:
         "height": 800,
         "center": true
       }
-    ],
-    "security": {
-      "csp": null
-    }
+    ]
   },
   "bundle": {
     "active": true,
-    "category": "public.app-category.utilities",
-    "targets": ["nsis", "dmg", "app"],
+    "category": "Productivity",
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
-      "icons/icon.ico"
+      "icons/icon.ico",
+      "icons/icon.png"
     ],
-    "externalBin": [
-      "binaries/ffmpeg",
-      "binaries/ffprobe"
-    ],
+    "macOS": {
+      "entitlements": "./Entitlements.plist",
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": true
+    },
     "windows": {
       "digestAlgorithm": "sha256",
       "timestampUrl": "http://timestamp.digicert.com"
-    },
-    "macOS": {
-      "entitlements": "./entitlements.plist",
-      "minimumSystemVersion": "12.0"
     }
   }
 }
@@ -453,9 +482,11 @@ Usage:
 # Bump version and build
 ./build_tools/build-macos.sh --bump
 
-# Re-sign without rebuilding (after entitlement changes)
+# Re-sign without rebuilding (after entitlement changes only)
 ./build_tools/build-macos.sh --skip-build
 ```
+
+**Note**: `--skip-build` only re-signs. If you change icons, you need a full build.
 
 ### Windows Store
 ```powershell
@@ -464,9 +495,6 @@ Usage:
 
 # Just repackage
 .\build_tools\build-msix.ps1 -SkipBuild
-
-# Sign for local testing
-.\build_tools\build-msix.ps1 -SelfSign
 ```
 
 ---
@@ -477,19 +505,20 @@ Usage:
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `App sandbox not enabled` on sidecars | Sidecar entitlements missing `app-sandbox` | Add `com.apple.security.app-sandbox` to `entitlements-sidecar.plist` |
-| `Missing application identifier` (90886) | Main entitlements missing app ID | Add `com.apple.application-identifier` and `com.apple.developer.team-identifier` to `entitlements.plist` |
+| `Missing required icon 512pt @2x` | icns missing 1024x1024 | Regenerate icns with all sizes (see Section 1) |
+| `App sandbox not enabled` on sidecars | Sidecar entitlements missing `app-sandbox` | Add both `app-sandbox` AND `inherit` |
+| `Missing application identifier` (90886) | Entitlements missing app ID | Add `com.apple.application-identifier` and `com.apple.developer.team-identifier` |
 | `Quarantine attribute` (91109) | Downloaded files have xattr | Add `xattr -cr "$APP_PATH"` before signing |
-| `Provisioning profile doesn't match` | Bundle ID mismatch | Ensure `identifier` in tauri.conf.json matches provisioning profile |
+| `Provisioning profile doesn't match` | Bundle ID mismatch | Ensure all IDs match: tauri.conf.json, entitlements, provisioning profile |
 | `Signature invalid` | Signed in wrong order | Sign sidecars FIRST, then main app bundle |
 
 ### Windows Store
 
 | Error | Cause | Solution |
 |-------|-------|----------|
-| `Publisher mismatch` | AppxManifest Publisher doesn't match Partner Center | Update Publisher CN to match your Partner Center identity |
+| `Publisher mismatch` | AppxManifest Publisher doesn't match Partner Center | Update Publisher CN to match |
 | `MakeAppx not found` | Windows SDK not installed | Install via Visual Studio Installer |
-| `Version format invalid` | MSIX requires 4-part version | Use `x.x.x.0` format in AppxManifest |
+| `Version format invalid` | MSIX requires 4-part version | Use `x.x.x.0` format |
 
 ---
 
@@ -499,15 +528,16 @@ Usage:
 
 #### Mac
 - [ ] Apple Developer membership active
-- [ ] Bundle ID registered in Apple Developer portal
-- [ ] App ID created with correct capabilities
-- [ ] Provisioning profile created and downloaded
+- [ ] Bundle ID registered in Apple Developer portal (Identifiers)
+- [ ] App ID created with correct capabilities (In-App Purchase if needed)
+- [ ] Provisioning profile created and downloaded to ~/Downloads/
 - [ ] Both certificates installed (Application + Installer)
-- [ ] `entitlements.plist` has `com.apple.application-identifier`
-- [ ] `entitlements.plist` has `com.apple.developer.team-identifier`
-- [ ] `entitlements-sidecar.plist` has BOTH `app-sandbox` and `inherit`
-- [ ] Build script removes quarantine attributes
-- [ ] Build script signs sidecars before main app
+- [ ] `Entitlements.plist` has `com.apple.application-identifier` with TEAM_ID.bundle.id
+- [ ] `Entitlements.plist` has `com.apple.developer.team-identifier` with TEAM_ID
+- [ ] `icon.icns` contains 1024x1024 (512pt @2x) - verify file is ~100KB+
+- [ ] Build script removes quarantine attributes (`xattr -cr`)
+- [ ] If using sidecars: `entitlements-sidecar.plist` has BOTH `app-sandbox` and `inherit`
+- [ ] If using sidecars: Build script signs them BEFORE main app
 
 #### Windows
 - [ ] Partner Center account created
@@ -518,29 +548,23 @@ Usage:
 
 ### Before Each Submission
 
-- [ ] Version bumped in all files (package.json, tauri.conf.json, Cargo.toml)
-- [ ] For Mac: Version also bumped in AppxManifest.xml Identity
-- [ ] Clean build completed
-- [ ] Package uploaded successfully to Transporter (Mac) or Partner Center (Windows)
-
----
-
-## Version History
-
-| Date | Changes |
-|------|---------|
-| 2025-12-17 | Initial template created from FlowBatch project learnings |
+- [ ] Version bumped in: package.json, tauri.conf.json, Cargo.toml
+- [ ] For Windows: Also bump in AppxManifest.xml
+- [ ] Full rebuild completed (not --skip-build if icons/binaries changed)
+- [ ] Package uploaded to Transporter (Mac) or Partner Center (Windows)
 
 ---
 
 ## Quick Reference
 
 ### Mac Signing Order
-1. Embed provisioning profile
-2. Remove quarantine attributes (`xattr -cr`)
-3. Sign sidecars with sidecar entitlements
-4. Sign main app with main entitlements
-5. Create pkg with installer identity
+1. Build universal binary (`--target universal-apple-darwin`)
+2. Embed provisioning profile
+3. Remove quarantine attributes (`xattr -cr`)
+4. Sign sidecars with sidecar entitlements (if any)
+5. Sign main app with main entitlements
+6. Verify signature
+7. Create pkg with installer identity
 
 ### Required Mac Entitlements (Main App)
 ```
@@ -555,7 +579,25 @@ com.apple.security.app-sandbox = true
 com.apple.security.inherit = true
 ```
 
-### Useful Commands
+### Generate Icon Command
+```bash
+cd src-tauri/icons
+mkdir -p icon.iconset
+sips -z 16 16 icon.png --out icon.iconset/icon_16x16.png
+sips -z 32 32 icon.png --out icon.iconset/icon_16x16@2x.png
+sips -z 32 32 icon.png --out icon.iconset/icon_32x32.png
+sips -z 64 64 icon.png --out icon.iconset/icon_32x32@2x.png
+sips -z 128 128 icon.png --out icon.iconset/icon_128x128.png
+sips -z 256 256 icon.png --out icon.iconset/icon_128x128@2x.png
+sips -z 256 256 icon.png --out icon.iconset/icon_256x256.png
+sips -z 512 512 icon.png --out icon.iconset/icon_256x256@2x.png
+sips -z 512 512 icon.png --out icon.iconset/icon_512x512.png
+sips -z 1024 1024 icon.png --out icon.iconset/icon_512x512@2x.png
+iconutil -c icns icon.iconset -o icon.icns
+rm -rf icon.iconset
+```
+
+### Useful Debug Commands
 ```bash
 # Verify signature
 codesign --verify --deep --strict --verbose=2 "path/to/App.app"
@@ -568,4 +610,17 @@ security cms -D -i "path/to/embedded.provisionprofile"
 
 # List signing identities
 security find-identity -v -p codesigning
+
+# Check icns contents
+file path/to/icon.icns
+sips -g all path/to/icon.icns
 ```
+
+---
+
+## Version History
+
+| Date | Changes |
+|------|---------|
+| 2024-12-17 | Added icon generation section, installer cert check, signature verification, updated from FlowBatch/IronBase/Redstrings builds |
+| 2024-12-17 | Initial template created from FlowBatch project learnings |
