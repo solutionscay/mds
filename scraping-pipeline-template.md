@@ -108,25 +108,33 @@ EXCLUDE:
 ## Step 1: Create Project Structure
 
 ```
-{project}/content-pipeline/
-├── scripts/
-│   ├── search.js              # Google Search API discovery
-│   ├── fetch-page.js          # Playwright web scraper
-│   ├── audit.js               # Record validation
-│   ├── sync-processed.js      # Domain deduplication
-│   └── enrich.js              # (Optional) External API enrichment
-├── data/
-│   ├── regions.json           # Geographic coverage + categories
-│   ├── blacklist.json         # Domains/patterns to exclude
-│   ├── candidates.json        # Discovered URLs with status
-│   ├── processed-domains.json # Domains already handled
-│   ├── audit-report.json      # Generated audit results
-│   └── drafts/                # Draft records for review
-├── .env                       # API keys (add to .gitignore)
-├── .env.example               # API key template
-├── package.json
-├── README.md
-└── MVP.md                     # Implementation spec
+{project}/
+├── content/
+│   ├── _data/
+│   │   └── cityAreas.json     # Enabled metros tracker (site-level)
+│   └── listings/              # Record files
+├── src/
+│   └── _data/
+│       └── cityAreas.js       # (Optional) Eleventy data file
+└── content-pipeline/
+    ├── scripts/
+    │   ├── search.js              # Google Search API discovery
+    │   ├── fetch-page.js          # Playwright web scraper
+    │   ├── audit.js               # Record validation
+    │   ├── sync-processed.js      # Domain deduplication
+    │   └── enrich.js              # (Optional) External API enrichment
+    ├── data/
+    │   ├── regions.json           # Geographic coverage + categories
+    │   ├── blacklist.json         # Domains/patterns to exclude
+    │   ├── candidates.json        # Discovered URLs with status
+    │   ├── processed-domains.json # Domains already handled
+    │   ├── audit-report.json      # Generated audit results
+    │   └── drafts/                # Draft records for review
+    ├── .env                       # API keys (add to .gitignore)
+    ├── .env.example               # API key template
+    ├── package.json
+    ├── README.md
+    └── MVP.md                     # Implementation spec
 ```
 
 **package.json:**
@@ -165,6 +173,94 @@ GOOGLE_PLACES_API_KEY=your_places_key_here
 ---
 
 ## Step 2: Build Configuration Files
+
+### Metro/City-Area Tracking
+
+**Purpose:** Track which metros are enabled for the live site, separate from the full search coverage.
+
+The pipeline uses TWO related but distinct geographic data structures:
+
+| File | Location | Purpose |
+|------|----------|---------|
+| `regions.json` | `content-pipeline/data/` | Full search coverage - all metros/cities to search |
+| `cityAreas.json` | `content/_data/` | Site tracking - which metros are enabled for the site |
+
+**Why separate files?**
+- `regions.json` defines what you CAN search (full potential coverage)
+- `cityAreas.json` defines what's LIVE on the site (incrementally expanded)
+- Allows gradual rollout: search all of Texas, but only enable DFW initially
+
+### `content/_data/cityAreas.json`
+
+Tracks enabled metros with their metadata. **This is the source of truth for which metros appear on the site.**
+
+```json
+{
+  "texas/dallas-fort-worth": {
+    "slug": "dallas-fort-worth",
+    "name": "Dallas-Fort Worth",
+    "state": "texas"
+  },
+  "texas/houston": {
+    "slug": "houston",
+    "name": "Houston",
+    "state": "texas"
+  },
+  "florida/orlando": {
+    "slug": "orlando",
+    "name": "Orlando",
+    "state": "florida"
+  }
+}
+```
+
+**Key format:** `{state}/{metro-slug}` - enables easy lookup and prevents collisions
+
+**Workflow for adding a new metro:**
+
+1. **Add to `cityAreas.json`:**
+   ```json
+   "texas/el-paso": {
+     "slug": "el-paso",
+     "name": "El Paso",
+     "state": "texas"
+   }
+   ```
+
+2. **Ensure metro exists in `regions.json`** (for search coverage)
+
+3. **Run search for the new metro:**
+   ```bash
+   node --env-file=.env scripts/search.js "El Paso" TX
+   ```
+
+4. **Process candidates and create listings**
+
+5. **Site automatically generates pages** for the new metro (if using dynamic page generation)
+
+### Optional: Eleventy Data File
+
+If using Eleventy, create a JS version for template access:
+
+**File:** `src/_data/cityAreas.js`
+
+```javascript
+/**
+ * City Areas Data
+ * Returns array of city areas for catalog page generation
+ */
+module.exports = [
+  // Texas
+  { slug: 'dallas-fort-worth', name: 'Dallas-Fort Worth', state: 'texas' },
+  { slug: 'houston', name: 'Houston', state: 'texas' },
+  // Florida
+  { slug: 'orlando', name: 'Orlando', state: 'florida' }
+];
+```
+
+This allows templates to iterate over metros for navigation, sitemap, etc.
+
+---
 
 ### `data/regions.json`
 
@@ -575,6 +671,19 @@ cp .env.example .env
 node scripts/sync-processed.js  # Initialize domain tracker
 ```
 
+**Create initial `content/_data/cityAreas.json`:**
+```json
+{
+  "texas/dallas-fort-worth": {
+    "slug": "dallas-fort-worth",
+    "name": "Dallas-Fort Worth",
+    "state": "texas"
+  }
+}
+```
+
+Start with one or two metros, expand as you add listings.
+
 ### Daily Discovery Workflow
 
 ```bash
@@ -613,6 +722,41 @@ node --env-file=.env scripts/enrich.js --category texas
 # Re-enrich stale records (older than 30 days)
 node --env-file=.env scripts/enrich.js --stale 30
 ```
+
+### Expanding to New Metros
+
+When ready to add a new metro to the site:
+
+1. **Add to `content/_data/cityAreas.json`:**
+   ```json
+   "texas/el-paso": {
+     "slug": "el-paso",
+     "name": "El Paso",
+     "state": "texas"
+   }
+   ```
+
+2. **Verify metro exists in `content-pipeline/data/regions.json`**
+   - If not, add the region with cities list
+
+3. **Search the new metro:**
+   ```bash
+   node --env-file=.env scripts/search.js "El Paso" TX
+   ```
+
+4. **Process candidates** - run fetch-page, evaluate, create listings
+
+5. **Sync processed domains:**
+   ```bash
+   node scripts/sync-processed.js
+   ```
+
+6. **Run audit on new listings:**
+   ```bash
+   node scripts/audit.js --dry-run
+   ```
+
+**Tip:** Add metros incrementally. It's better to have 10 solid listings in one metro than 2 listings each across 5 metros.
 
 ---
 
@@ -666,6 +810,7 @@ Before building, confirm with the user:
 - [ ] Enrichment needed? (Places API)
 - [ ] Quality rules for audit
 - [ ] Blacklist domains identified
+- [ ] Initial metros for `cityAreas.json` (can expand later)
 
 ---
 
@@ -677,6 +822,7 @@ Before building, confirm with the user:
 - **Categories:** Museums, Zoos, Farms, Sports, Arts
 - **Enrichment:** No (address from website sufficient)
 - **Keywords:** "homeschool day", "homeschool program", "homeschool discount"
+- **Metro tracking:** `cityAreas.json` with 14 metros (10 TX, 4 FL)
 - **Live example:** [homeschooldeals.org](https://homeschooldeals.org)
 
 ### Local Service Provider Directory
